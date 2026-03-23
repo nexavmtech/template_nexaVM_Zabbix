@@ -1,0 +1,170 @@
+zabbix_export:
+  version: '6.0'
+  date: '2024-03-23T16:00:00Z'
+  template_groups:
+    - uuid: '748ad4d09d474493b09280dd4b69d90a'
+      name: 'Templates/Virtualization'
+  templates:
+    - uuid: 'eb6f3b0e5d1b4657a840742187f5d470'
+      template: 'NexaVM by HTTP and SNMP'
+      name: 'NexaVM by HTTP and SNMP'
+      description: |
+        Comprehensive NexaVM (ZStack) monitoring template.
+        Combines REST API (Access Key) for inventory and SNMP for full performance metrics.
+        Includes: CPU, Memory, Network Throughput, and Disk I/O.
+        License: MIT
+      vendor:
+        name: 'Community'
+        version: '1.1'
+      groups:
+        - name: 'Templates/Virtualization'
+      items:
+        - name: 'NexaVM: Get infrastructure data'
+          type: SCRIPT
+          key: nexavm.get.data
+          delay: 2m
+          history: 0d
+          trends: '0'
+          value_type: TEXT
+          params: |
+            var request = new HttpRequest();
+            var url = '{$NEXAVM.URL}/zstack/v1/';
+            request.addHeader('Content-Type: application/json');
+            var authBody = {"logInByAccessKey": {"accessKeyId": "{$NEXAVM.AK}", "accessKeySecret": "{$NEXAVM.AS}"}};
+            var response = request.put(url + 'accounts/login/access-key', JSON.stringify(authBody));
+            if (request.getStatus() !== 200) { throw 'Auth Error: ' + response; }
+            var token = JSON.parse(response).inventory.uuid;
+            request.addHeader('Authorization: OAuth ' + token);
+            var vms = JSON.parse(request.get(url + 'vm-instances')).inventories;
+            var hosts = JSON.parse(request.get(url + 'hosts')).inventories;
+            return JSON.stringify({"vms": vms, "hosts": hosts});
+          description: 'Master item for API data collection.'
+
+      discovery_rules:
+        - name: 'VM Discovery'
+          type: DEPENDENT
+          key: nexavm.vm.discovery
+          master_item:
+            key: nexavm.get.data
+          lld_macro_paths:
+            - lld_macro: '{#VM.UUID}'
+              path: '$.uuid'
+            - lld_macro: '{#VM.NAME}'
+              path: '$.name'
+          preprocessing:
+            - type: JSONPATH
+              parameters: ['$.vms']
+          item_prototypes:
+            - name: 'VM {#VM.NAME}: State'
+              type: DEPENDENT
+              key: 'nexavm.vm.state[{#VM.UUID}]'
+              master_item:
+                key: nexavm.get.data
+              preprocessing:
+                - type: JSONPATH
+                  parameters: ['$.vms[?(@.uuid == "{#VM.UUID}")].state.first()']
+                - type: JAVASCRIPT
+                  parameters: ["var states = {'Running': 1, 'Stopped': 0, 'Paused': 2}; return states[value] || 9;"]
+              valuemap:
+                name: 'NexaVM VM State'
+              tags:
+                - tag: Application
+                  value: 'VM {#VM.NAME}'
+
+        - name: 'Host Discovery'
+          type: DEPENDENT
+          key: nexavm.host.discovery
+          master_item:
+            key: nexavm.get.data
+          lld_macro_paths:
+            - lld_macro: '{#HOST.UUID}'
+              path: '$.uuid'
+            - lld_macro: '{#HOST.NAME}'
+              path: '$.name'
+          preprocessing:
+            - type: JSONPATH
+              parameters: ['$.hosts']
+          item_prototypes:
+            # CPU & SYSTEM
+            - name: 'Host {#HOST.NAME}: CPU Usage'
+              type: SNMP_AGENT
+              snmp_oid: '.1.3.6.1.4.1.60687.1.1.2.1.27'
+              key: 'nexavm.host.cpu[{#HOST.UUID}]'
+              units: '%'
+              tags: [{tag: Component, value: CPU}]
+
+            # MEMORY
+            - name: 'Host {#HOST.NAME}: Memory Used %'
+              type: SNMP_AGENT
+              snmp_oid: '.1.3.6.1.4.1.60687.1.1.2.1.49'
+              key: 'nexavm.host.mem[{#HOST.UUID}]'
+              units: '%'
+              tags: [{tag: Component, value: Memory}]
+
+            # NETWORK (Using OIDs from MIB)
+            - name: 'Host {#HOST.NAME}: Network Inbound'
+              type: SNMP_AGENT
+              snmp_oid: '.1.3.6.1.4.1.60687.1.1.2.1.33'
+              key: 'nexavm.host.net.in[{#HOST.UUID}]'
+              units: 'bps'
+              preprocessing:
+                - type: CHANGE_PER_SECOND
+                - type: MULTIPLIER
+                  parameters: ['8']
+              tags: [{tag: Component, value: Network}]
+
+            - name: 'Host {#HOST.NAME}: Network Outbound'
+              type: SNMP_AGENT
+              snmp_oid: '.1.3.6.1.4.1.60687.1.1.2.1.36'
+              key: 'nexavm.host.net.out[{#HOST.UUID}]'
+              units: 'bps'
+              preprocessing:
+                - type: CHANGE_PER_SECOND
+                - type: MULTIPLIER
+                  parameters: ['8']
+              tags: [{tag: Component, value: Network}]
+
+            # STORAGE (Using OIDs from MIB)
+            - name: 'Host {#HOST.NAME}: Disk Read Rate'
+              type: SNMP_AGENT
+              snmp_oid: '.1.3.6.1.4.1.60687.1.1.2.1.39'
+              key: 'nexavm.host.disk.read[{#HOST.UUID}]'
+              units: 'Bps'
+              preprocessing:
+                - type: CHANGE_PER_SECOND
+              tags: [{tag: Component, value: Storage}]
+
+            - name: 'Host {#HOST.NAME}: Disk Write Rate'
+              type: SNMP_AGENT
+              snmp_oid: '.1.3.6.1.4.1.60687.1.1.2.1.42'
+              key: 'nexavm.host.disk.write[{#HOST.UUID}]'
+              units: 'Bps'
+              preprocessing:
+                - type: CHANGE_PER_SECOND
+              tags: [{tag: Component, value: Storage}]
+
+            - name: 'Host {#HOST.NAME}: Disk Space Used %'
+              type: SNMP_AGENT
+              snmp_oid: '.1.3.6.1.4.1.60687.1.1.2.1.43'
+              key: 'nexavm.host.disk.capacity[{#HOST.UUID}]'
+              units: '%'
+              tags: [{tag: Component, value: Storage}]
+
+      macros:
+        - macro: '{$NEXAVM.URL}'
+          description: 'NexaVM Controller URL (e.g. http://10.0.0.1:8080)'
+        - macro: '{$NEXAVM.AK}'
+          description: 'Access Key ID'
+        - macro: '{$NEXAVM.AS}'
+          type: SECRET_TEXT
+          description: 'Access Key Secret'
+        - macro: '{$SNMP_COMMUNITY}'
+          value: public
+
+      valuemaps:
+        - name: 'NexaVM VM State'
+          mappings:
+            - { value: '0', newvalue: Stopped }
+            - { value: '1', newvalue: Running }
+            - { value: '2', newvalue: Paused }
+            - { value: '9', newvalue: Unknown }
